@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hệ Thống Quét Trạm Phát Sóng 5G Từ Excel</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <!-- Thư viện SheetJS đọc file Excel -->
+    <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+    <style>
+        #map { height: 450px; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 font-sans">
+
+    <div class="max-w-4xl mx-auto p-4 sm:p-6">
+        <!-- Header -->
+        <header class="text-center mb-8">
+            <h1 class="text-3xl font-bold text-blue-600 mb-2">Hệ Thống Check Sóng 5G</h1>
+            <p class="text-slate-500">Dữ liệu trạm phát được nạp tự động từ hệ thống.</p>
+        </header>
+
+        <!-- Thông báo trạng thái nạp dữ liệu tự động -->
+        <div class="bg-white p-4 sm:p-5 rounded-2xl shadow-sm border border-slate-100 mb-6 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <svg id="loadingIcon" class="animate-spin h-5 w-5 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <span id="uploadStatus" class="text-sm font-bold text-slate-700">Đang tự động nạp dữ liệu trạm...</span>
+            </div>
+        </div>
+
+        <!-- Khu vực nhập tọa độ kiểm tra -->
+        <div class="bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100 mb-6">
+            <label class="block text-sm font-bold text-slate-700 mb-2">Nhập tọa độ cần quét sóng</label>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                    <label class="block text-xs font-semibold text-slate-500 uppercase mb-1">Vĩ độ (Latitude)</label>
+                    <input type="number" id="latInput" placeholder="Ví dụ: 10.776" step="any"
+                        class="w-full px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-slate-500 uppercase mb-1">Kinh độ (Longitude)</label>
+                    <input type="number" id="lngInput" placeholder="Ví dụ: 106.700" step="any"
+                        class="w-full px-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div class="flex items-end">
+                    <button id="scanBtn" onclick="checkCoordinates()" disabled
+                        class="w-full bg-slate-400 text-white font-medium py-3 rounded-xl transition-all shadow-sm cursor-not-allowed">
+                        Đang chờ dữ liệu...
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Result Card -->
+        <div id="resultCard" class="hidden bg-white p-5 rounded-2xl shadow-sm border border-slate-100 mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+                <h3 class="text-sm font-semibold text-slate-400 tracking-wider uppercase">Kết quả quét hệ thống</h3>
+                <p id="resultText" class="text-base font-bold mt-1 text-slate-700"></p>
+                <p id="detailText" class="text-sm text-slate-500 mt-0.5"></p>
+            </div>
+            <div class="flex items-center">
+                <div id="statusBadge" class="px-4 py-2 rounded-full text-sm font-bold"></div>
+            </div>
+        </div>
+
+        <!-- Map Container -->
+        <div class="bg-white p-2 rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+            <div id="map" class="rounded-xl"></div>
+        </div>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // --- THAY ĐỔI TÊN FILE EXCEL CỦA BẠN TẠI ĐÂY ---
+        const EXCEL_FILE_NAME = "danh_sach_tram.xlsx"; 
+        
+        let STATION_DATA = [];
+
+        // Khởi tạo bản đồ mặc định tại Việt Nam
+        const map = L.map('map').setView([16.047079, 108.20623], 6);
+        
+        // Sử dụng bản đồ Esri cực kỳ ổn định, không yêu cầu API Key
+        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', {
+            maxZoom: 19,
+            attribution: 'Tiles © Esri'
+        }).addTo(map);
+
+        let userMarker = null;
+        let stationCircles = [];
+
+        // TỰ ĐỘNG ĐỌC FILE TỪ THƯ MỤC KHI VỪA MỞ TRANG
+        window.onload = function() {
+            fetch(EXCEL_FILE_NAME)
+                .then(response => {
+                    if (!response.ok) throw new Error("Không tìm thấy file " + EXCEL_FILE_NAME);
+                    return response.arrayBuffer();
+                })
+                .then(data => {
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const firstSheetName = workbook.SheetNames[0];
+                    const worksheet = workbook.Sheets[firstSheetName];
+                    const jsonData = XLSX.utils.sheet_to_json(worksheet);
+
+                    // Chuẩn hóa định dạng số 
+                    STATION_DATA = jsonData.map(item => ({
+                        name: item.name || "Trạm không tên",
+                        lat: parseFloat(item.lat),
+                        lng: parseFloat(item.lng),
+                        radius: parseFloat(item.radius) || 300
+                    })).filter(item => !isNaN(item.lat) && !isNaN(item.lng));
+
+                    // Cập nhật giao diện khi nạp xong
+                    document.getElementById('loadingIcon').classList.add('hidden');
+                    const statusSpan = document.getElementById('uploadStatus');
+                    statusSpan.textContent = `✅ Đã nạp thành công ${STATION_DATA.length} trạm từ file gốc`;
+                    statusSpan.className = "text-sm font-bold text-green-600";
+                    
+                    // Mở khóa nút quét
+                    const scanBtn = document.getElementById('scanBtn');
+                    scanBtn.disabled = false;
+                    scanBtn.textContent = "Quét sóng tại vị trí này";
+                    scanBtn.className = "w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 rounded-xl transition-all shadow-sm";
+
+                    // Vẽ lại các vùng phủ sóng của trạm lên bản đồ
+                    renderStationsOnMap();
+                })
+                .catch(error => {
+                    console.error("Lỗi:", error);
+                    document.getElementById('loadingIcon').classList.add('hidden');
+                    const statusSpan = document.getElementById('uploadStatus');
+                    statusSpan.textContent = `❌ Lỗi: Không thể tải ${EXCEL_FILE_NAME}. Hãy chắc chắn bạn đã đặt file ở cùng thư mục và đang chạy Live Server.`;
+                    statusSpan.className = "text-sm font-bold text-red-600";
+                });
+        };
+
+        // Hàm vẽ các vòng tròn trạm từ dữ liệu Excel lên bản đồ
+        function renderStationsOnMap() {
+            stationCircles.forEach(circle => map.removeLayer(circle));
+            stationCircles = [];
+
+            if (STATION_DATA.length === 0) return;
+
+            STATION_DATA.forEach(station => {
+                const circle = L.circle([station.lat, station.lng], {
+                    color: '#6366f1',
+                    fillColor: '#818cf8',
+                    fillOpacity: 0.15,
+                    radius: station.radius
+                }).addTo(map).bindPopup(`<b>${station.name}</b><br>Bán kính phủ: ${station.radius}m`);
+                
+                stationCircles.push(circle);
+            });
+
+            const group = new L.featureGroup(stationCircles);
+            map.fitBounds(group.getBounds());
+        }
+
+        // Hàm toán học Haversine tính khoảng cách đường cong mặt cầu (mét)
+        function getDistanceMeter(lat1, lon1, lat2, lon2) {
+            const R = 6371000; 
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const a = 
+                Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+                Math.sin(dLon/2) * Math.sin(dLon/2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c;
+        }
+
+        // Xử lý nút kích hoạt quét vị trí
+        function checkCoordinates() {
+            const lat = parseFloat(document.getElementById('latInput').value);
+            const lng = parseFloat(document.getElementById('lngInput').value);
+
+            if (isNaN(lat) || isNaN(lng)) {
+                alert('Vui lòng nhập đúng và đủ tọa độ Lat/Lng cần quét!');
+                return;
+            }
+
+            if (STATION_DATA.length === 0) {
+                alert('Dữ liệu trạm chưa được tải thành công!');
+                return;
+            }
+
+            map.setView([lat, lng], 15);
+
+            if (userMarker) map.removeLayer(userMarker);
+            userMarker = L.marker([lat, lng]).addTo(map).bindPopup("Vị trí bạn chọn").openPopup();
+
+            let foundStation = null;
+            let minDistance = Infinity;
+
+            STATION_DATA.forEach(station => {
+                const distance = getDistanceMeter(lat, lng, station.lat, station.lng);
+                if (distance <= station.radius) {
+                    if (distance < minDistance) {
+                        minDistance = distance;
+                        foundStation = station;
+                    }
+                }
+            });
+
+            const resultCard = document.getElementById('resultCard');
+            const resultText = document.getElementById('resultText');
+            const detailText = document.getElementById('detailText');
+            const statusBadge = document.getElementById('statusBadge');
+
+            resultCard.classList.remove('hidden');
+            resultText.textContent = `Tọa độ kiểm tra: [${lat}, ${lng}]`;
+
+            if (foundStation) {
+                statusBadge.textContent = 'Có sóng 5G';
+                statusBadge.className = 'px-4 py-2 rounded-full text-sm font-bold bg-green-100 text-green-700 whitespace-nowrap';
+                detailText.textContent = `Nằm trong vùng phủ sóng của: ${foundStation.name} (Cách ${Math.round(minDistance)}m)`;
+            } else {
+                statusBadge.textContent = 'Không có sóng';
+                statusBadge.className = 'px-4 py-2 rounded-full text-sm font-bold bg-red-100 text-red-700 whitespace-nowrap';
+                detailText.textContent = 'Vị trí này nằm ngoài vùng phủ sóng của tất cả các trạm trong hệ thống.';
+            }
+        }
+    </script>
+</body>
+</html>
